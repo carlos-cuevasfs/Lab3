@@ -21,11 +21,13 @@ The exercise enhances the understanding of coordinate transformations and basic 
 To control the turtle's movement, we calculate two key metrics:
 
 - **Distance to Goal (DTG)**: The straight-line distance between the turtle’s current position \((x, y)\) and the goal’s position \((x_g, y_g)\). This is calculated using the Euclidean distance formula:
+
 $$
 DTG = \sqrt{(x_{goal} - x_{current})^2 + (y_{goal} - y_{current})^2}
 $$
 
 - **Angle to Goal (ATG)**: The direction in which the turtle needs to turn to face the goal. It is calculated as the angle between the turtle’s current heading and the direction to the goal:
+
 $$
 ATG = \arctan2(y_{goal} - y_{current}, x_{goal} - x_{current})
 $$
@@ -37,16 +39,18 @@ These metrics provide the foundation for controlling the turtle’s movement tow
 To move the turtle toward the goal, we use a **Proportional (P) controller** that adjusts the turtle's velocity based on the distance to the goal and the angle error:
 
 - **Linear velocity** is proportional to the distance to the goal:
+
 $$
 v = K_p \cdot DTG
 $$
 
 - **Angular velocity** is proportional to the angular error (difference between current orientation and goal orientation):
+
 $$
 \omega = K_p \cdot (ATG - \theta_{current})
 $$
 
-Here, \(K_p)\ is the proportional gain that determines how aggressively the turtle moves toward the goal.
+Here, $K_p$ is the proportional gain that determines how aggressively the turtle moves toward the goal.
 
 ### ROS Communication
 
@@ -67,24 +71,60 @@ In this problem, the goal is to spawn the turtle at a specific position and orie
 ### Code Summary
 
 ```python
+#!/usr/bin/env python3
+
+import rospy
+from turtlesim.srv import Spawn, Kill
+import math
+
 def kill_turtle(name):
     rospy.wait_for_service('/kill')
-    rospy.ServiceProxy('/kill', Kill)(name)
+    try:
+        kill = rospy.ServiceProxy('/kill', Kill)
+        kill(name)
+    except rospy.ServiceException:
+        rospy.logwarn(f"Could not kill {name}, it was probably already removed.")
 
 def spawn_turtle(x, y, theta_deg, name):
-    theta_rad = math.radians(theta_deg)
     rospy.wait_for_service('/spawn')
-    rospy.ServiceProxy('/spawn', Spawn)(x, y, theta_rad, name)
-    return x, y, theta_rad
+    try:
+        theta_rad = math.radians(theta_deg)  # Convert from degrees to radians
+        spawn = rospy.ServiceProxy('/spawn', Spawn)
+        spawn(x, y, theta_rad, name)
+        return x, y, theta_rad
+    except rospy.ServiceException as e:
+        rospy.logerr(f"Error while spawning turtle: {e}")
+        return None
 
 def main():
     rospy.init_node('turtle_spawn_goal', anonymous=True)
-    xg, yg, thetag_deg = map(float, input("x y theta: ").split())
+
+    # Ask the user for the target position (goal)
+    x_goal = float(input("Enter x coordinate of the goal: "))
+    y_goal = float(input("Enter y coordinate of the goal: "))
+    theta_goal_deg = float(input("Enter goal theta angle (in degrees): "))
+
+    # Remove the default turtle
     kill_turtle("turtle1")
-    xc, yc, thetac = spawn_turtle(xg, yg, thetag_deg, "turtle1")
-    dtg = math.hypot(xg - xc, yg - yc)
-    atg = math.degrees(math.atan2(yg - yc, xg - xc))
-    print(f"DTG: {dtg:.4f} | ATG: {atg:.4f}°")
+
+    # Spawn a new turtle at the desired position
+    result = spawn_turtle(x_goal, y_goal, theta_goal_deg, "turtle1")
+
+    if result:
+        x_current, y_current, theta_current = result
+
+        # Calculate Distance to Goal (DTG)
+        dtg = math.sqrt((x_goal - x_current)**2 + (y_goal - y_current)**2)
+
+        # Calculate Angle to Goal (ATG) in radians and then convert to degrees
+        atg_rad = math.atan2((y_goal - y_current), (x_goal - x_current))
+        atg_deg = math.degrees(atg_rad)
+
+        print(f"\nDistance to Goal (DTG): {dtg:.4f}")
+        print(f"Angle to Goal (ATG): {atg_deg:.4f}°")
+
+if __name__ == '__main__':
+    main()
 ```
 
 1. **ROS Imports**: The necessary ROS libraries (`rospy`, `geometry_msgs`, `turtlesim`) are imported to set up the communication with ROS.
@@ -104,34 +144,105 @@ In this problem, the turtle must move toward the goal from a starting position, 
 ### Code Summary
 
 ```python
-class TurtleControl:
+#!/usr/bin/env python3
+
+import rospy
+from geometry_msgs.msg import Twist
+from turtlesim.msg import Pose
+from math import atan2, sqrt, pow, radians, degrees
+
+class MoveTurtleProportionalControl:
     def __init__(self):
-        rospy.init_node('turtle_controller')
+        rospy.init_node('turtle_proportional_controller', anonymous=True)
+        
         self.pose_sub = rospy.Subscriber('/turtle1/pose', Pose, self.pose_callback)
-        self.cmd_pub = rospy.Publisher('/turtle1/cmd_vel', Twist, queue_size=10)
-        self.x = self.y = self.theta = 0
-        self.rate = rospy.Rate(10)
+        self.cmd_vel_pub = rospy.Publisher('/turtle1/cmd_vel', Twist, queue_size=10)
+        self.rate = rospy.Rate(10)  # 10 Hz
 
-    def pose_callback(self, msg):
-        self.x, self.y, self.theta = msg.x, msg.y, msg.theta
+        self.x = 0
+        self.y = 0
+        self.theta = 0
 
-    def get_goal(self):
-        x, y, theta = map(float, input("Goal x y theta: ").split())
-        return x, y, math.radians(theta)
+    def pose_callback(self, data):
+        self.x = data.x
+        self.y = data.y
+        self.theta = data.theta
 
-    def move_to_goal(self, gx, gy):
-        Kp_lin, Kp_ang = 1.5, 6.0
+    def get_user_input(self):
+        print("\nEnter new target position")
+        x = float(input("Target x coordinate: "))
+        y = float(input("Target y coordinate: "))
+        theta_deg = float(input("Desired angle (degrees): "))
+        return x, y, radians(theta_deg)
+
+    def move_to_goal(self, goal_x, goal_y):
+        vel_msg = Twist()
+        Kp_linear = 1.5
+        Kp_angular = 6.0
+
         while not rospy.is_shutdown():
-            dtg = math.hypot(gx - self.x, gy - self.y)
-            atg = math.atan2(gy - self.y, gx - self.x)
-            diff = (atg - self.theta + math.pi) % (2 * math.pi) - math.pi
-            vel = Twist()
-            vel.linear.x = Kp_lin * dtg
-            vel.angular.z = Kp_ang * diff
-            self.cmd_pub.publish(vel)
-            rospy.loginfo(f"DTG: {dtg:.2f} | ATG: {math.degrees(diff):.2f}°")
-            if dtg < 0.1: break
+            # Calculate DTG and ATG using Euclidean coordinates
+            dtg = sqrt(pow(goal_x - self.x, 2) + pow(goal_y - self.y, 2))
+            atg = atan2(goal_y - self.y, goal_x - self.x)
+            angle_diff = atg - self.theta
+
+            # Normalize the angle to [-pi, pi]
+            angle_diff = (angle_diff + 3.14159) % (2 * 3.14159) - 3.14159
+
+            # Speeds proportional to the error
+            vel_msg.linear.x = Kp_linear * dtg
+            vel_msg.angular.z = Kp_angular * angle_diff
+
+            self.cmd_vel_pub.publish(vel_msg)
+
+            rospy.loginfo("DTG: %.4f | ATG: %.4f°", dtg, degrees(angle_diff))
+
+            # When very close to the target, stop
+            if dtg < 0.1:
+                break
+
             self.rate.sleep()
+
+        # Stop completely
+        vel_msg.linear.x = 0
+        vel_msg.angular.z = 0
+        self.cmd_vel_pub.publish(vel_msg)
+        rospy.loginfo("Target reached.\n")
+
+    def rotate_to_theta(self, desired_theta):
+        vel_msg = Twist()
+        Kp_theta = 4.0
+
+        while not rospy.is_shutdown():
+            error_theta = desired_theta - self.theta
+            error_theta = (error_theta + 3.14159) % (2 * 3.14159) - 3.14159
+
+            vel_msg.angular.z = Kp_theta * error_theta
+            self.cmd_vel_pub.publish(vel_msg)
+
+            rospy.loginfo("Final angle error: %.4f°", degrees(error_theta))
+
+            if abs(error_theta) < 0.05:
+                break
+
+            self.rate.sleep()
+
+        # Stop rotation
+        vel_msg.angular.z = 0
+        self.cmd_vel_pub.publish(vel_msg)
+
+    def run(self):
+        while not rospy.is_shutdown():
+            goal_x, goal_y, goal_theta = self.get_user_input()
+            self.move_to_goal(goal_x, goal_y)
+            self.rotate_to_theta(goal_theta)
+
+if __name__ == '__main__':
+    try:
+        controller = MoveTurtleProportionalControl()
+        controller.run()
+    except rospy.ROSInterruptException:
+        pass
 ```
 
 1. **Class-based Structure**: A class is used to define the main logic, where subscribers are set up to track the turtle’s pose and publishers send velocity commands.
